@@ -5,7 +5,7 @@ NVM_INIT := source ~/.nvm/nvm.sh && nvm use
 RUN := $(NVM_INIT) && unset ELECTRON_RUN_AS_NODE &&
 SANDBOX_BUNDLE := packages/bruno-js/src/sandbox/bundle-browser-rollup.js
 
-.PHONY: help setup sandbox ensure-sandbox dev web electron build-web clean-dev-env
+.PHONY: help setup sandbox ensure-sandbox dev web electron build-web build-mac build-win clean-dev-env
 
 help:
 	@echo "Available commands:"
@@ -15,6 +15,8 @@ help:
 	@echo "  make sandbox   Bundle JS sandbox libraries"
 	@echo "  make setup     Install deps, build packages, and bundle sandbox"
 	@echo "  make build-web Build the Bruno web renderer"
+	@echo "  make build-mac Build the macOS Electron app"
+	@echo "  make build-win Build the Windows Electron app"
 
 dev: ensure-sandbox
 	$(RUN) npm run dev
@@ -39,6 +41,12 @@ setup:
 
 build-web:
 	$(RUN) npm run build:web
+
+build-mac: build-web
+	$(RUN) npm run build:electron:mac
+
+build-win: build-web
+	$(RUN) npm run build:electron:win
 
 clean-dev-env:
 	@echo "Unset ELECTRON_RUN_AS_NODE in your current shell with:"

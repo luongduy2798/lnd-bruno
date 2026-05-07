@@ -8,7 +8,7 @@ const notarize = async function (params) {
     return;
   }
 
-  let appId = 'com.usebruno.app';
+  let appId = 'com.lnd.bruno';
 
   let appPath = path.join(params.appOutDir, `${params.packager.appInfo.productFilename}.app`);
   if (!fs.existsSync(appPath)) {
