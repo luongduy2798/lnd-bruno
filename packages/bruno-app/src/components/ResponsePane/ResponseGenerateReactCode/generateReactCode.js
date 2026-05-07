@@ -164,16 +164,20 @@ const buildTypesFile = ({ data, bodyData, names, hasTypedBody }) => {
   return sections.join('\n\n');
 };
 
-const buildUrlPathExpression = (path, pathParamKeys) => {
+const buildApiFile = ({ names, path }) => {
+  return `${formatPropertyName(names.functionName)}: ${JSON.stringify(path)};`;
+};
+
+const buildUrlPathExpression = (endpointExpression, pathParamKeys) => {
   if (!pathParamKeys.length) {
-    return JSON.stringify(path);
+    return endpointExpression;
   }
 
   const replaceChain = pathParamKeys
     .map((key) => `.replace('{{${key}}}', String(${formatParamAccess(key)}))`)
     .join('');
 
-  return `${JSON.stringify(path)}${replaceChain}`;
+  return `${endpointExpression}${replaceChain}`;
 };
 
 const buildQueryParamsBlock = (queryParamKeys) => {
@@ -199,15 +203,9 @@ const buildFunctionParams = ({ hasParams, paramsRequired, paramsObjectType, hasB
   return params.join(', ');
 };
 
-const buildServiceFile = ({ method, path, names, pathParamKeys, queryParamKeys, hasBody, hasTypedBody }) => {
+const buildServiceFile = ({ method, names, pathParamKeys, queryParamKeys, hasBody, hasTypedBody }) => {
   const hasParams = pathParamKeys.length > 0 || queryParamKeys.length > 0;
   const paramsRequired = pathParamKeys.length > 0;
-  const typeImports = [names.responseTypeName];
-
-  if (hasBody && hasTypedBody) {
-    typeImports.push(names.bodyTypeName);
-  }
-
   const paramsObjectType = buildParamsObjectType({
     pathParamKeys,
     queryParamKeys
@@ -237,22 +235,43 @@ const buildServiceFile = ({ method, path, names, pathParamKeys, queryParamKeys, 
     args.push('queryParams');
   }
 
-  return `import { apiRequestBase } from '@utils/apiRequest';\nimport type { ${typeImports.join(', ')} } from './types';\n\nexport function ${names.functionName}(${functionParams}) {\n  const urlPath = ${buildUrlPathExpression(path, pathParamKeys)};\n${queryParamsBlock ? `${queryParamsBlock}\n` : ''}  return apiRequestBase.${requestMethod}(${args.join(', ')}) as Promise<${names.responseTypeName}>;\n}`;
+  return `export function ${names.functionName}(${functionParams}) {\n  const urlPath = ${buildUrlPathExpression(`API_ENDPOINTS.${names.functionName}`, pathParamKeys)};\n${queryParamsBlock ? `${queryParamsBlock}\n` : ''}  return apiRequest.${requestMethod}(${args.join(', ')}) as Promise<${names.responseTypeName}>;\n}`;
 };
 
-const buildQueryKey = ({ functionName, hasParams }) => {
-  return hasParams ? `['${functionName}', params]` : `['${functionName}']`;
+const buildQueryKey = ({ functionName, pathParamKeys, queryParamKeys }) => {
+  const paramKeys = [...pathParamKeys, ...queryParamKeys];
+
+  if (!paramKeys.length) {
+    return `['${functionName}']`;
+  }
+
+  return `['${functionName}', ${paramKeys.map((key) => formatParamAccess(key, true)).join(', ')}]`;
+};
+
+const buildQueryKeyFunction = ({ names, pathParamKeys, queryParamKeys, paramsRequired, paramsObjectType }) => {
+  const hasParams = pathParamKeys.length > 0 || queryParamKeys.length > 0;
+  const functionParams = hasParams ? `params${paramsRequired ? '' : '?'}: ${paramsObjectType}` : '';
+
+  return `export const ${names.functionName}QueryKey = (${functionParams}) => ${buildQueryKey({
+    functionName: names.functionName,
+    pathParamKeys,
+    queryParamKeys
+  })} as const;`;
+};
+
+const getQueryDataName = (functionName) => {
+  const withoutQueryPrefix = functionName.replace(/^(get|fetch|load|list|read)(?=[A-Z])/, '');
+  const dataName = withoutQueryPrefix
+    ? withoutQueryPrefix.charAt(0).toLowerCase() + withoutQueryPrefix.slice(1)
+    : functionName;
+
+  return isValidIdentifier(dataName) ? dataName : 'responseData';
 };
 
 const buildHookFile = ({ method, names, pathParamKeys, queryParamKeys, hasBody, hasTypedBody }) => {
   const isQuery = method === 'GET';
   const hasParams = pathParamKeys.length > 0 || queryParamKeys.length > 0;
   const paramsRequired = pathParamKeys.length > 0;
-  const typeImports = [names.responseTypeName];
-
-  if (hasBody && hasTypedBody) {
-    typeImports.push(names.bodyTypeName);
-  }
 
   const paramsObjectType = buildParamsObjectType({
     pathParamKeys,
@@ -274,13 +293,23 @@ const buildHookFile = ({ method, names, pathParamKeys, queryParamKeys, hasBody, 
 
   if (isQuery) {
     hookParams.push(`options?: UseQueryOptions<${names.responseTypeName}, unknown, ${names.responseTypeName}, any>`);
+    const queryKeyFunction = buildQueryKeyFunction({
+      names,
+      pathParamKeys,
+      queryParamKeys,
+      paramsRequired,
+      paramsObjectType
+    });
+    const queryKeyCall = `${names.functionName}QueryKey(${hasParams ? 'params' : ''})`;
+    const dataName = getQueryDataName(names.functionName);
+    const refetchName = `refetch${toPascalCase(dataName)}`;
 
-    return `import type { UseQueryOptions } from '@tanstack/react-query';\nimport { useQueryWithGlobalError } from '@hooks/useQueryWithGlobalError';\nimport { ${names.functionName} } from './service';\nimport type { ${typeImports.join(', ')} } from './types';\n\nexport function ${names.hookName}(${hookParams.join(', ')}) {\n  return useQueryWithGlobalError({\n    queryKey: ${buildQueryKey({ functionName: names.functionName, hasParams })},\n    queryFn: () => ${names.functionName}(${serviceArgs.join(', ')}),\n    ...options,\n  });\n}`;
+    return `${queryKeyFunction}\n\nexport function ${names.hookName}(${hookParams.join(', ')}) {\n  const {\n    data,\n    isLoading,\n    isFetching,\n    isError,\n    refetch,\n  } = useQueryWithGlobalError({\n    queryKey: ${queryKeyCall},\n    queryFn: () => ${names.functionName}(${serviceArgs.join(', ')}),\n    ...options,\n  });\n\n  return useMemo(\n    () => ({\n      ${dataName}: data?.data,\n      isLoading,\n      isFetching,\n      isError,\n      ${refetchName}: refetch,\n    }),\n    [data?.data, isLoading, isFetching, isError, refetch],\n  );\n}`;
   }
 
   hookParams.push(`options?: UseMutationOptions<${names.responseTypeName}, unknown, any, any>`);
 
-  return `import type { UseMutationOptions } from '@tanstack/react-query';\nimport { useMutationWithGlobalError } from '@hooks/useQueryWithGlobalError';\nimport { ${names.functionName} } from './service';\nimport type { ${typeImports.join(', ')} } from './types';\n\nexport function ${names.hookName}(${hookParams.join(', ')}) {\n  return useMutationWithGlobalError({\n    mutationFn: () => ${names.functionName}(${serviceArgs.join(', ')}),\n    ...options,\n  });\n}`;
+  return `export function ${names.hookName}(${hookParams.join(', ')}) {\n  return useMutationWithGlobalError({\n    mutationFn: () => ${names.functionName}(${serviceArgs.join(', ')}),\n    ...options,\n  });\n}`;
 };
 
 export const generateReactCodeFiles = ({ item, data }) => {
@@ -313,12 +342,20 @@ export const generateReactCodeFiles = ({ item, data }) => {
       })
     },
     {
+      id: 'api',
+      fileName: 'api.ts',
+      label: 'API',
+      code: buildApiFile({
+        names,
+        path
+      })
+    },
+    {
       id: 'service',
       fileName: 'service.ts',
       label: 'Service',
       code: buildServiceFile({
         method,
-        path,
         names,
         pathParamKeys,
         queryParamKeys,

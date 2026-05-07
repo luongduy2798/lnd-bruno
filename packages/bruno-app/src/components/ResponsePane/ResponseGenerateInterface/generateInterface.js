@@ -1,6 +1,5 @@
 export const RESPONSE_MODEL_LANGUAGES = [
   { id: 'typescript', label: 'TypeScript', mode: 'javascript' },
-  { id: 'java', label: 'Java', mode: 'text/x-java' },
   { id: 'dart', label: 'Dart', mode: 'javascript' }
 ];
 
