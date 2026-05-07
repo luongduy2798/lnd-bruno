@@ -69,6 +69,58 @@ const StyledWrapper = styled.div`
   code {
     font-family: ${(props) => props.theme.font.mono};
   }
+
+  .react-code-highlight {
+    font-family: ${(props) => props.theme.font.mono};
+
+    span.cm-def,
+    span.cm-type {
+      color: ${(props) => props.theme.codemirror.tokens.definition} !important;
+    }
+
+    span.cm-property {
+      color: ${(props) => props.theme.codemirror.tokens.property} !important;
+    }
+
+    span.cm-string {
+      color: ${(props) => props.theme.codemirror.tokens.string} !important;
+    }
+
+    span.cm-number {
+      color: ${(props) => props.theme.codemirror.tokens.number} !important;
+    }
+
+    span.cm-atom {
+      color: ${(props) => props.theme.codemirror.tokens.atom} !important;
+    }
+
+    span.cm-variable,
+    span.cm-variable-2,
+    span.cm-builtin {
+      color: ${(props) => props.theme.codemirror.tokens.variable} !important;
+    }
+
+    span.cm-keyword {
+      color: ${(props) => props.theme.codemirror.tokens.keyword} !important;
+    }
+
+    span.cm-comment {
+      color: ${(props) => props.theme.codemirror.tokens.comment} !important;
+    }
+
+    span.cm-operator {
+      color: ${(props) => props.theme.codemirror.tokens.operator} !important;
+    }
+
+    span.cm-tag {
+      color: ${(props) => props.theme.codemirror.tokens.tag} !important;
+    }
+
+    span.cm-tag.cm-bracket,
+    span.cm-bracket {
+      color: ${(props) => props.theme.codemirror.tokens.tagBracket} !important;
+    }
+  }
 `;
 
 export default StyledWrapper;

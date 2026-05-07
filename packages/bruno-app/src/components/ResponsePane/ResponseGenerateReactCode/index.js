@@ -10,6 +10,35 @@ import TriggerWrapper from '../ResponseCopy/StyledWrapper';
 import StyledWrapper from './StyledWrapper';
 import { generateReactCodeFiles } from './generateReactCode';
 
+const CodeMirror = require('codemirror');
+require('codemirror/addon/runmode/runmode');
+require('codemirror/mode/javascript/javascript');
+
+const CodePreview = ({ code }) => {
+  const codeRef = useRef(null);
+
+  useEffect(() => {
+    if (!codeRef.current) {
+      return;
+    }
+
+    codeRef.current.textContent = '';
+
+    if (CodeMirror.runMode) {
+      CodeMirror.runMode(code || '', 'text/typescript', codeRef.current);
+      return;
+    }
+
+    codeRef.current.textContent = code || '';
+  }, [code]);
+
+  return (
+    <pre className="react-code-highlight cm-s-default">
+      <code ref={codeRef} />
+    </pre>
+  );
+};
+
 const ResponseGenerateReactCode = forwardRef(({ data, item, children }, ref) => {
   const [modalOpen, setModalOpen] = useState(false);
   const [activeFileId, setActiveFileId] = useState('types');
@@ -122,9 +151,7 @@ const ResponseGenerateReactCode = forwardRef(({ data, item, children }, ref) => 
               </div>
 
               <div className="react-code-content">
-                <pre>
-                  <code>{activeFile?.code || ''}</code>
-                </pre>
+                <CodePreview code={activeFile?.code || ''} />
               </div>
             </StyledWrapper>
           </Modal>

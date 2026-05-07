@@ -1,3 +1,5 @@
+import { format } from 'prettier/standalone';
+import prettierPluginTypescript from 'prettier/parser-typescript';
 import { generateResponseModel } from '../ResponseGenerateInterface/generateInterface';
 
 const HTTP_METHODS_WITH_BODY = new Set(['POST', 'PUT', 'PATCH']);
@@ -144,6 +146,21 @@ const buildBodyTypes = (bodyData, bodyTypeName) => {
   }
 };
 
+const formatGeneratedCode = (code) => {
+  try {
+    return format(code, {
+      parser: 'typescript',
+      plugins: [prettierPluginTypescript],
+      printWidth: 100,
+      tabWidth: 2,
+      semi: true,
+      trailingComma: 'all'
+    }).trim();
+  } catch (error) {
+    return code;
+  }
+};
+
 const buildParamsObjectType = ({ pathParamKeys, queryParamKeys }) => {
   if (!pathParamKeys.length && !queryParamKeys.length) {
     return '';
@@ -238,25 +255,27 @@ const buildServiceFile = ({ method, names, pathParamKeys, queryParamKeys, hasBod
   return `export function ${names.functionName}(${functionParams}) {\n  const urlPath = ${buildUrlPathExpression(`API_ENDPOINTS.${names.functionName}`, pathParamKeys)};\n${queryParamsBlock ? `${queryParamsBlock}\n` : ''}  return apiRequest.${requestMethod}(${args.join(', ')}) as Promise<${names.responseTypeName}>;\n}`;
 };
 
-const buildQueryKey = ({ functionName, pathParamKeys, queryParamKeys }) => {
+const buildQueryKeyDetail = ({ queryKeyName, pathParamKeys, queryParamKeys }) => {
   const paramKeys = [...pathParamKeys, ...queryParamKeys];
 
-  if (!paramKeys.length) {
-    return `['${functionName}']`;
-  }
-
-  return `['${functionName}', ${paramKeys.map((key) => formatParamAccess(key, true)).join(', ')}]`;
+  return `[\n    ...${queryKeyName}.all,\n    ${paramKeys.map((key) => formatParamAccess(key, true)).join(',\n    ')}\n  ]`;
 };
 
-const buildQueryKeyFunction = ({ names, pathParamKeys, queryParamKeys, paramsRequired, paramsObjectType }) => {
+const buildQueryKeyObject = ({ names, pathParamKeys, queryParamKeys, paramsRequired, paramsObjectType }) => {
   const hasParams = pathParamKeys.length > 0 || queryParamKeys.length > 0;
   const functionParams = hasParams ? `params${paramsRequired ? '' : '?'}: ${paramsObjectType}` : '';
+  const queryKeyName = `${names.functionName}QueryKey`;
+  const baseKey = `  all: ['${queryKeyName}'] as const`;
 
-  return `export const ${names.functionName}QueryKey = (${functionParams}) => ${buildQueryKey({
-    functionName: names.functionName,
+  if (!hasParams) {
+    return `export const ${queryKeyName} = {\n${baseKey}\n};`;
+  }
+
+  return `export const ${queryKeyName} = {\n${baseKey},\n  detail: (${functionParams}) => ${buildQueryKeyDetail({
+    queryKeyName,
     pathParamKeys,
     queryParamKeys
-  })} as const;`;
+  })} as const\n};`;
 };
 
 const getQueryDataName = (functionName) => {
@@ -293,18 +312,18 @@ const buildHookFile = ({ method, names, pathParamKeys, queryParamKeys, hasBody, 
 
   if (isQuery) {
     hookParams.push(`options?: UseQueryOptions<${names.responseTypeName}, unknown, ${names.responseTypeName}, any>`);
-    const queryKeyFunction = buildQueryKeyFunction({
+    const queryKeyObject = buildQueryKeyObject({
       names,
       pathParamKeys,
       queryParamKeys,
       paramsRequired,
       paramsObjectType
     });
-    const queryKeyCall = `${names.functionName}QueryKey(${hasParams ? 'params' : ''})`;
+    const queryKeyCall = hasParams ? `${names.functionName}QueryKey.detail(params)` : `${names.functionName}QueryKey.all`;
     const dataName = getQueryDataName(names.functionName);
     const refetchName = `refetch${toPascalCase(dataName)}`;
 
-    return `${queryKeyFunction}\n\nexport function ${names.hookName}(${hookParams.join(', ')}) {\n  const {\n    data,\n    isLoading,\n    isFetching,\n    isError,\n    refetch,\n  } = useQueryWithGlobalError({\n    queryKey: ${queryKeyCall},\n    queryFn: () => ${names.functionName}(${serviceArgs.join(', ')}),\n    ...options,\n  });\n\n  return useMemo(\n    () => ({\n      ${dataName}: data?.data,\n      isLoading,\n      isFetching,\n      isError,\n      ${refetchName}: refetch,\n    }),\n    [data?.data, isLoading, isFetching, isError, refetch],\n  );\n}`;
+    return `${queryKeyObject}\n\nexport function ${names.hookName}(${hookParams.join(', ')}) {\n  const {\n    data,\n    isLoading,\n    isFetching,\n    isError,\n    refetch,\n  } = useQueryWithGlobalError({\n    queryKey: ${queryKeyCall},\n    queryFn: () => ${names.functionName}(${serviceArgs.join(', ')}),\n    ...options,\n  });\n\n  return useMemo(\n    () => ({\n      ${dataName}: data?.data,\n      isLoading,\n      isFetching,\n      isError,\n      ${refetchName}: refetch,\n    }),\n    [data?.data, isLoading, isFetching, isError, refetch],\n  );\n}`;
   }
 
   hookParams.push(`options?: UseMutationOptions<${names.responseTypeName}, unknown, any, any>`);
@@ -334,47 +353,47 @@ export const generateReactCodeFiles = ({ item, data }) => {
       id: 'types',
       fileName: 'types.ts',
       label: 'Types',
-      code: buildTypesFile({
+      code: formatGeneratedCode(buildTypesFile({
         data,
         bodyData,
         names,
         hasTypedBody
-      })
+      }))
     },
     {
       id: 'api',
       fileName: 'api.ts',
       label: 'API',
-      code: buildApiFile({
+      code: formatGeneratedCode(buildApiFile({
         names,
         path
-      })
+      }))
     },
     {
       id: 'service',
       fileName: 'service.ts',
       label: 'Service',
-      code: buildServiceFile({
+      code: formatGeneratedCode(buildServiceFile({
         method,
         names,
         pathParamKeys,
         queryParamKeys,
         hasBody,
         hasTypedBody
-      })
+      }))
     },
     {
       id: 'use-query',
       fileName: 'useQuery.ts',
       label: 'useQuery',
-      code: buildHookFile({
+      code: formatGeneratedCode(buildHookFile({
         method,
         names,
         pathParamKeys,
         queryParamKeys,
         hasBody,
         hasTypedBody
-      })
+      }))
     }
   ];
 };
