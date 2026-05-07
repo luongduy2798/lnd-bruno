@@ -179,6 +179,16 @@ const isExecutableFile = (filePath) => {
   }
 };
 
+const getCodexBinaryNames = (binaryName = 'codex') =>
+  process.platform === 'win32'
+    ? [
+        `${binaryName}.cmd`,
+        `${binaryName}.exe`,
+        `${binaryName}.bat`,
+        binaryName
+      ]
+    : [binaryName];
+
 const getPathCandidates = () => {
   const pathDirs = (process.env.PATH || '')
     .split(path.delimiter)
@@ -191,35 +201,60 @@ const getPathCandidates = () => {
   return Array.from(new Set([...pathDirs, ...defaultDirs]));
 };
 
-const findExecutableInPath = (binaryName) => {
-  const binaryNames
-    = process.platform === 'win32'
-      ? [
-          `${binaryName}.cmd`,
-          `${binaryName}.exe`,
-          `${binaryName}.bat`,
-          binaryName
-        ]
-      : [binaryName];
+const findExecutablesInPath = (binaryName) => {
+  const binaryNames = getCodexBinaryNames(binaryName);
+  const candidates = [];
+  const seen = new Set();
 
   for (const dir of getPathCandidates()) {
     for (const name of binaryNames) {
       const candidate = path.join(dir, name);
 
-      if (isExecutableFile(candidate)) {
-        return candidate;
+      if (isExecutableFile(candidate) && !seen.has(candidate)) {
+        seen.add(candidate);
+        candidates.push(candidate);
       }
     }
   }
 
-  return '';
+  return candidates;
 };
+
+const findExecutableInPath = (binaryName) =>
+  findExecutablesInPath(binaryName)[0] || '';
+
+const findCodexInNvmInstallations = () => {
+  const versionsDir = path.join(os.homedir(), '.nvm', 'versions', 'node');
+
+  if (!fs.existsSync(versionsDir)) {
+    return [];
+  }
+
+  return fs
+    .readdirSync(versionsDir)
+    .filter((entry) =>
+      isExecutableFile(path.join(versionsDir, entry, 'bin', 'codex'))
+    )
+    .sort((a, b) =>
+      b.localeCompare(a, undefined, { numeric: true, sensitivity: 'base' })
+    )
+    .map((entry) => path.join(versionsDir, entry, 'bin', 'codex'));
+};
+
+const findCodexInKnownLocations = () => [
+  path.join(os.homedir(), '.volta', 'bin', 'codex'),
+  path.join(os.homedir(), '.asdf', 'shims', 'codex'),
+  path.join(os.homedir(), '.local', 'bin', 'codex'),
+  path.join(os.homedir(), '.npm-global', 'bin', 'codex'),
+  '/opt/homebrew/bin/codex',
+  '/usr/local/bin/codex'
+].filter(isExecutableFile);
 
 const findCodexInVscodeExtensions = () => {
   const extensionsDir = path.join(os.homedir(), '.vscode', 'extensions');
 
   if (!fs.existsSync(extensionsDir)) {
-    return '';
+    return [];
   }
 
   const extensionDirs = fs
@@ -227,6 +262,7 @@ const findCodexInVscodeExtensions = () => {
     .filter((entry) => entry.startsWith('openai.chatgpt-'))
     .sort()
     .reverse();
+  const candidates = [];
 
   for (const extensionDir of extensionDirs) {
     const binDir = path.join(extensionsDir, extensionDir, 'bin');
@@ -249,7 +285,7 @@ const findCodexInVscodeExtensions = () => {
           && entry.name === 'codex'
           && isExecutableFile(entryPath)
         ) {
-          return entryPath;
+          candidates.push(entryPath);
         }
 
         if (entry.isDirectory() && current.depth < 3) {
@@ -259,7 +295,85 @@ const findCodexInVscodeExtensions = () => {
     }
   }
 
-  return '';
+  return candidates;
+};
+
+const getCodexSourceLabel = (source) => {
+  switch (source) {
+    case 'configured':
+      return 'Configured path';
+    case 'path':
+      return 'PATH';
+    case 'nvm':
+      return 'NVM';
+    case 'known-location':
+      return 'Local install';
+    case 'vscode-extension':
+      return 'VS Code extension';
+    default:
+      return 'Detected';
+  }
+};
+
+const addCodexCliCandidate = (candidates, seen, candidatePath, source) => {
+  const normalizedPath = expandHomePath(String(candidatePath || '').trim());
+
+  if (!isExecutableFile(normalizedPath)) {
+    return;
+  }
+
+  let key = normalizedPath;
+
+  try {
+    key = fs.realpathSync(normalizedPath);
+  } catch (error) {
+    key = normalizedPath;
+  }
+
+  if (seen.has(key)) {
+    return;
+  }
+
+  seen.add(key);
+  candidates.push({
+    path: normalizedPath,
+    source,
+    sourceLabel: getCodexSourceLabel(source)
+  });
+};
+
+const collectCodexCliCandidates = (configuredPath = '') => {
+  const candidates = [];
+  const seen = new Set();
+  const requestedPath = expandHomePath(String(configuredPath || '').trim());
+
+  if (requestedPath) {
+    if (!requestedPath.includes(path.sep)) {
+      addCodexCliCandidate(
+        candidates,
+        seen,
+        findExecutableInPath(requestedPath),
+        'configured'
+      );
+    } else {
+      addCodexCliCandidate(candidates, seen, requestedPath, 'configured');
+    }
+  }
+
+  findExecutablesInPath('codex').forEach((candidate) =>
+    addCodexCliCandidate(candidates, seen, candidate, 'path')
+  );
+  findCodexInNvmInstallations().forEach((candidate) =>
+    addCodexCliCandidate(candidates, seen, candidate, 'nvm')
+  );
+  findCodexInKnownLocations().forEach((candidate) =>
+    addCodexCliCandidate(candidates, seen, candidate, 'known-location')
+  );
+  findCodexInVscodeExtensions().forEach((candidate) =>
+    addCodexCliCandidate(candidates, seen, candidate, 'vscode-extension')
+  );
+
+  return candidates;
 };
 
 const resolveCodexCliPath = (configuredPath = '') => {
@@ -285,25 +399,14 @@ const resolveCodexCliPath = (configuredPath = '') => {
     };
   }
 
-  const pathCandidate = findExecutableInPath('codex');
+  const autoCandidate = collectCodexCliCandidates()[0];
 
-  if (pathCandidate) {
+  if (autoCandidate) {
     return {
       configuredPath: '',
-      path: pathCandidate,
+      path: autoCandidate.path,
       found: true,
-      source: 'path'
-    };
-  }
-
-  const vscodeCandidate = findCodexInVscodeExtensions();
-
-  if (vscodeCandidate) {
-    return {
-      configuredPath: '',
-      path: vscodeCandidate,
-      found: true,
-      source: 'vscode-extension'
+      source: autoCandidate.source
     };
   }
 
@@ -358,10 +461,36 @@ const execFileWithInput = (file, args, options = {}) => {
   });
 };
 
+const getCodexCliVersion = async (codexPath) => {
+  try {
+    const versionResult = await execFileWithInput(codexPath, ['--version'], {
+      env: buildCodexEnv(codexPath),
+      timeout: 5000,
+      maxBuffer: 1024 * 256
+    });
+
+    return `${versionResult.stdout || versionResult.stderr}`.trim();
+  } catch {
+    return '';
+  }
+};
+
+const getCodexCliCandidates = async (configuredPath = '') => {
+  const candidates = collectCodexCliCandidates(configuredPath);
+
+  return Promise.all(
+    candidates.map(async (candidate) => ({
+      ...candidate,
+      version: await getCodexCliVersion(candidate.path)
+    }))
+  );
+};
+
 const getCodexCliStatus = async (configuredPath = '') => {
   const resolved = resolveCodexCliPath(configuredPath);
   const status = {
     ...resolved,
+    sourceLabel: getCodexSourceLabel(resolved.source),
     version: '',
     loggedIn: false,
     loginStatus: '',
@@ -586,6 +715,12 @@ const registerAiIpc = (mainWindow) => {
 
   ipcMain.handle('renderer:ai:check-codex-cli', async (_, codexCliPath = '') =>
     getCodexCliStatus(codexCliPath)
+  );
+
+  ipcMain.handle(
+    'renderer:ai:list-codex-cli-candidates',
+    async (_, codexCliPath = aiStore.getCodexCliPath()) =>
+      getCodexCliCandidates(codexCliPath)
   );
 
   ipcMain.handle('renderer:ai:generate-tests', async (_, payload = {}) => {

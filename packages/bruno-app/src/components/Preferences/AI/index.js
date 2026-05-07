@@ -6,19 +6,53 @@ import StyledWrapper from './StyledWrapper';
 
 const DEFAULT_MODEL = 'gpt-5.5';
 const DEFAULT_PROVIDER = 'openai';
+const AUTO_CLI_OPTION = '__auto__';
+const CUSTOM_CLI_OPTION = '__custom__';
+
+const getCodexCliCandidateLabel = (candidate = {}) => {
+  const version = candidate.version || 'Unknown version';
+  const source = candidate.sourceLabel || candidate.source || 'Detected';
+
+  return `${version} - ${source} - ${candidate.path}`;
+};
 
 const AI = () => {
   const [provider, setProvider] = useState(DEFAULT_PROVIDER);
   const [apiKey, setApiKey] = useState('');
   const [model, setModel] = useState(DEFAULT_MODEL);
   const [codexCliPath, setCodexCliPath] = useState('');
+  const [codexCliCandidates, setCodexCliCandidates] = useState([]);
   const [codexModel, setCodexModel] = useState('');
   const [status, setStatus] = useState(null);
   const [isLoading, setIsLoading] = useState(true);
   const [isSaving, setIsSaving] = useState(false);
   const [isCheckingCli, setIsCheckingCli] = useState(false);
+  const [isLoadingCliCandidates, setIsLoadingCliCandidates] = useState(false);
   const [error, setError] = useState('');
   const hasIpc = Boolean(window.ipcRenderer?.invoke);
+
+  const refreshCodexCliCandidates = async (configuredPath = '') => {
+    if (!hasIpc) {
+      return [];
+    }
+
+    setIsLoadingCliCandidates(true);
+
+    try {
+      const candidates = await window.ipcRenderer.invoke(
+        'renderer:ai:list-codex-cli-candidates',
+        configuredPath
+      );
+      const nextCandidates = Array.isArray(candidates) ? candidates : [];
+      setCodexCliCandidates(nextCandidates);
+      return nextCandidates;
+    } catch {
+      setCodexCliCandidates([]);
+      return [];
+    } finally {
+      setIsLoadingCliCandidates(false);
+    }
+  };
 
   const loadStatus = async () => {
     if (!hasIpc) {
@@ -37,6 +71,7 @@ const AI = () => {
       setModel(nextStatus?.openai?.model || nextStatus?.model || DEFAULT_MODEL);
       setCodexCliPath(nextStatus?.codexCli?.configuredPath || '');
       setCodexModel(nextStatus?.codexCli?.model || '');
+      await refreshCodexCliCandidates(nextStatus?.codexCli?.configuredPath || '');
     } catch (statusError) {
       setError(statusError?.message || 'Failed to load AI settings.');
     } finally {
@@ -83,7 +118,8 @@ const AI = () => {
     const cli = status?.codexCli || {};
 
     if (cli.found && cli.loggedIn) {
-      return `Codex CLI ready${cli.version ? `: ${cli.version}` : ''}${cli.path ? ` at ${cli.path}` : ''}.`;
+      const source = cli.sourceLabel ? ` (${cli.sourceLabel})` : '';
+      return `Codex CLI ready${cli.version ? `: ${cli.version}` : ''}${cli.path ? ` at ${cli.path}` : ''}${source}.`;
     }
 
     if (cli.found && !cli.loggedIn) {
@@ -92,6 +128,39 @@ const AI = () => {
 
     return cli.error || 'Codex CLI not found. Install Codex or set a custom CLI path.';
   }, [isLoading, status]);
+
+  const selectedCodexCliOption = useMemo(() => {
+    const currentPath = codexCliPath.trim();
+
+    if (!currentPath) {
+      return AUTO_CLI_OPTION;
+    }
+
+    if (codexCliCandidates.some((candidate) => candidate.path === currentPath)) {
+      return currentPath;
+    }
+
+    return CUSTOM_CLI_OPTION;
+  }, [codexCliCandidates, codexCliPath]);
+
+  const selectCodexCliOption = (event) => {
+    const nextOption = event.target.value;
+    setError('');
+
+    if (nextOption === AUTO_CLI_OPTION) {
+      setCodexCliPath('');
+      return;
+    }
+
+    if (nextOption === CUSTOM_CLI_OPTION) {
+      if (selectedCodexCliOption !== CUSTOM_CLI_OPTION) {
+        setCodexCliPath('');
+      }
+      return;
+    }
+
+    setCodexCliPath(nextOption);
+  };
 
   const saveSettings = async (event) => {
     event.preventDefault();
@@ -124,6 +193,7 @@ const AI = () => {
       setCodexCliPath(nextStatus?.codexCli?.configuredPath || '');
       setCodexModel(nextStatus?.codexCli?.model || '');
       setApiKey('');
+      await refreshCodexCliCandidates(nextStatus?.codexCli?.configuredPath || '');
       toast.success('AI settings saved');
     } catch (saveError) {
       setError(saveError?.message || 'Failed to save AI settings.');
@@ -172,6 +242,7 @@ const AI = () => {
           configuredPath: codexCliPath.trim()
         }
       }));
+      await refreshCodexCliCandidates(codexCliPath.trim());
 
       if (cliStatus.found && cliStatus.loggedIn) {
         toast.success('Codex CLI is ready');
@@ -273,6 +344,41 @@ const AI = () => {
           </div>
 
           <div className="ai-field">
+            <label className="block select-none" htmlFor="codexCliVersion">
+              CLI Version
+            </label>
+            <select
+              id="codexCliVersion"
+              name="codexCliVersion"
+              className="textbox w-full mousetrap ai-select"
+              value={selectedCodexCliOption}
+              disabled={isLoading || isSaving || !hasIpc}
+              onChange={selectCodexCliOption}
+            >
+              <option value={AUTO_CLI_OPTION}>Auto-detect Codex CLI</option>
+              {isLoadingCliCandidates && (
+                <option value="__loading__" disabled>
+                  Loading detected versions...
+                </option>
+              )}
+              {!isLoadingCliCandidates && codexCliCandidates.length === 0 && (
+                <option value="__empty__" disabled>
+                  No detected Codex CLI versions
+                </option>
+              )}
+              {codexCliCandidates.map((candidate) => (
+                <option key={candidate.path} value={candidate.path}>
+                  {getCodexCliCandidateLabel(candidate)}
+                </option>
+              ))}
+              <option value={CUSTOM_CLI_OPTION}>Custom path...</option>
+            </select>
+            <div className="ai-help">
+              Auto-detect checks PATH and local Node installs before the VS Code extension.
+            </div>
+          </div>
+
+          <div className="ai-field">
             <label className="block select-none" htmlFor="codexCliPath">
               CLI Path
             </label>
@@ -291,7 +397,7 @@ const AI = () => {
               onChange={(event) => setCodexCliPath(event.target.value)}
             />
             <div className="ai-help">
-              Leave blank to auto-detect `codex`. If it is not found, paste the full path from `command -v codex`.
+              Leave blank to auto-detect `codex`, choose a detected version above, or paste a full executable path.
             </div>
           </div>
 

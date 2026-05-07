@@ -74,6 +74,10 @@ const StyledWrapper = styled.div`
     gap: 12px;
   }
 
+  .ai-select {
+    height: 32px;
+  }
+
   label {
     font-size: 0.8125rem;
   }
