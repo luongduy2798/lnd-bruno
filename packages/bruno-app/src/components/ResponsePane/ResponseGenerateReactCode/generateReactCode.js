@@ -116,6 +116,17 @@ const getBodyData = (request) => {
   }
 };
 
+const isObject = (value) => Boolean(value) && typeof value === 'object' && !Array.isArray(value);
+
+const isListResponseData = (data) => {
+  try {
+    const parsedData = parseJson(data);
+    return isObject(parsedData) && isObject(parsedData.data) && 'total' in parsedData.data && Array.isArray(parsedData.data.results);
+  } catch (error) {
+    return false;
+  }
+};
+
 const buildResponseTypes = (data, responseTypeName) => {
   try {
     return generateResponseModel(data, 'typescript', responseTypeName);
@@ -255,23 +266,27 @@ const buildServiceFile = ({ method, names, pathParamKeys, queryParamKeys, hasBod
   return `export function ${names.functionName}(${functionParams}) {\n  const urlPath = ${buildUrlPathExpression(`API_ENDPOINTS.${names.functionName}`, pathParamKeys)};\n${queryParamsBlock ? `${queryParamsBlock}\n` : ''}  return apiRequest.${requestMethod}(${args.join(', ')}) as Promise<${names.responseTypeName}>;\n}`;
 };
 
-const buildQueryKeyDetail = ({ queryKeyName, pathParamKeys, queryParamKeys }) => {
+const buildQueryKeyMethodValue = ({ queryKeyName, pathParamKeys, queryParamKeys }) => {
   const paramKeys = [...pathParamKeys, ...queryParamKeys];
+
+  if (!paramKeys.length) {
+    return `[\n    ...${queryKeyName}.all\n  ]`;
+  }
 
   return `[\n    ...${queryKeyName}.all,\n    ${paramKeys.map((key) => formatParamAccess(key, true)).join(',\n    ')}\n  ]`;
 };
 
-const buildQueryKeyObject = ({ names, pathParamKeys, queryParamKeys, paramsRequired, paramsObjectType }) => {
+const buildQueryKeyObject = ({ names, pathParamKeys, queryParamKeys, paramsRequired, paramsObjectType, keyMethodName }) => {
   const hasParams = pathParamKeys.length > 0 || queryParamKeys.length > 0;
   const functionParams = hasParams ? `params${paramsRequired ? '' : '?'}: ${paramsObjectType}` : '';
   const queryKeyName = `${names.functionName}QueryKey`;
   const baseKey = `  all: ['${queryKeyName}'] as const`;
 
-  if (!hasParams) {
+  if (!keyMethodName) {
     return `export const ${queryKeyName} = {\n${baseKey}\n};`;
   }
 
-  return `export const ${queryKeyName} = {\n${baseKey},\n  detail: (${functionParams}) => ${buildQueryKeyDetail({
+  return `export const ${queryKeyName} = {\n${baseKey},\n  ${keyMethodName}: (${functionParams}) => ${buildQueryKeyMethodValue({
     queryKeyName,
     pathParamKeys,
     queryParamKeys
@@ -287,7 +302,7 @@ const getQueryDataName = (functionName) => {
   return isValidIdentifier(dataName) ? dataName : 'responseData';
 };
 
-const buildHookFile = ({ method, names, pathParamKeys, queryParamKeys, hasBody, hasTypedBody }) => {
+const buildHookFile = ({ method, names, pathParamKeys, queryParamKeys, hasBody, hasTypedBody, isListResponse }) => {
   const isQuery = method === 'GET';
   const hasParams = pathParamKeys.length > 0 || queryParamKeys.length > 0;
   const paramsRequired = pathParamKeys.length > 0;
@@ -311,17 +326,33 @@ const buildHookFile = ({ method, names, pathParamKeys, queryParamKeys, hasBody, 
   }
 
   if (isQuery) {
-    hookParams.push(`options?: UseQueryOptions<${names.responseTypeName}, unknown, ${names.responseTypeName}, any>`);
+    hookParams.push(
+      `options?: ${isListResponse ? 'any' : `UseQueryOptions<${names.responseTypeName}, unknown, ${names.responseTypeName}, any>`}`
+    );
+    const keyMethodName = isListResponse ? 'list' : hasParams ? 'detail' : null;
     const queryKeyObject = buildQueryKeyObject({
       names,
       pathParamKeys,
       queryParamKeys,
       paramsRequired,
-      paramsObjectType
+      paramsObjectType,
+      keyMethodName
     });
-    const queryKeyCall = hasParams ? `${names.functionName}QueryKey.detail(params)` : `${names.functionName}QueryKey.all`;
+    const queryKeyCall = keyMethodName ? `${names.functionName}QueryKey.${keyMethodName}(${hasParams ? 'params' : ''})` : `${names.functionName}QueryKey.all`;
     const dataName = getQueryDataName(names.functionName);
     const refetchName = `refetch${toPascalCase(dataName)}`;
+
+    if (isListResponse) {
+      const hasOffsetParam = queryParamKeys.includes('offset');
+      const queryFn = hasOffsetParam
+        ? `queryFn: ({ pageParam = params?.offset ?? 0 }: { pageParam?: string | number }) => ${names.functionName}({\n      ...params,\n      offset: pageParam,\n    }),`
+        : `queryFn: () => ${names.functionName}(${serviceArgs.join(', ')}),`;
+      const paginationOptions = hasOffsetParam
+        ? `initialPageParam: params?.offset ?? 0,\n    getNextPageParam: (lastPage, allPages) => {\n      const limit = Number(params?.limit ?? 10);\n      const total = Number(lastPage?.data?.total ?? 0);\n      const nextOffset = allPages.length * limit;\n      return nextOffset < total ? nextOffset : undefined;\n    },`
+        : `initialPageParam: undefined,\n    getNextPageParam: () => undefined,`;
+
+      return `${queryKeyObject}\n\nexport function ${names.hookName}(${hookParams.join(', ')}) {\n  const {\n    data,\n    isLoading,\n    isFetching,\n    isError,\n    refetch,\n    fetchNextPage,\n    hasNextPage,\n    isFetchingNextPage,\n  } = useInfiniteQueryWithGlobalError<${names.responseTypeName}>({\n    queryKey: ${queryKeyCall},\n    ${queryFn}\n    ${paginationOptions}\n    ...options,\n  });\n\n  return useMemo(\n    () => ({\n      ${dataName}: data?.pages.flatMap((page) => page?.data?.results ?? []) ?? [],\n      total: data?.pages[0]?.data?.total ?? 0,\n      isLoading,\n      isFetching,\n      isError,\n      fetchNextPage,\n      hasNextPage,\n      isFetchingNextPage,\n      ${refetchName}: refetch,\n    }),\n    [data?.pages, isLoading, isFetching, isError, fetchNextPage, hasNextPage, isFetchingNextPage, refetch],\n  );\n}`;
+    }
 
     return `${queryKeyObject}\n\nexport function ${names.hookName}(${hookParams.join(', ')}) {\n  const {\n    data,\n    isLoading,\n    isFetching,\n    isError,\n    refetch,\n  } = useQueryWithGlobalError({\n    queryKey: ${queryKeyCall},\n    queryFn: () => ${names.functionName}(${serviceArgs.join(', ')}),\n    ...options,\n  });\n\n  return useMemo(\n    () => ({\n      ${dataName}: data?.data,\n      isLoading,\n      isFetching,\n      isError,\n      ${refetchName}: refetch,\n    }),\n    [data?.data, isLoading, isFetching, isError, refetch],\n  );\n}`;
   }
@@ -347,6 +378,7 @@ export const generateReactCodeFiles = ({ item, data }) => {
     bodyTypeName: `${baseName}Body`
   };
   const { hasBody, bodyData, hasTypedBody } = getBodyData(request);
+  const isListResponse = isListResponseData(data);
 
   return [
     {
@@ -392,7 +424,8 @@ export const generateReactCodeFiles = ({ item, data }) => {
         pathParamKeys,
         queryParamKeys,
         hasBody,
-        hasTypedBody
+        hasTypedBody,
+        isListResponse
       }))
     }
   ];
