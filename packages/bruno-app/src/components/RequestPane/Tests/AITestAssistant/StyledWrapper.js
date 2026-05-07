@@ -49,6 +49,82 @@ const StyledWrapper = styled.div`
     font-weight: 600;
   }
 
+  .ai-activity {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    padding: 10px;
+    border-bottom: 1px solid ${(props) => props.theme.workspace.border};
+    background: ${(props) => rgba(props.theme.text, 0.02)};
+  }
+
+  .ai-activity-title {
+    color: ${(props) => props.theme.text};
+    font-size: ${(props) => props.theme.font.size.xs};
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+  }
+
+  .ai-activity-entry {
+    position: relative;
+    min-height: 18px;
+    padding-left: 22px;
+    color: ${(props) => props.theme.colors.text.muted};
+    font-size: ${(props) => props.theme.font.size.xs};
+    line-height: 1.45;
+  }
+
+  .ai-activity-entry::before {
+    content: '';
+    position: absolute;
+    left: 0;
+    top: 2px;
+    width: 12px;
+    height: 12px;
+    border-radius: 999px;
+    background: ${(props) => props.theme.button2.color.primary.bg};
+  }
+
+  .ai-activity-entry.running::before {
+    background: transparent;
+    border: 2px solid ${(props) => rgba(props.theme.button2.color.primary.bg, 0.22)};
+    border-top-color: ${(props) => props.theme.button2.color.primary.bg};
+    animation: ai-activity-spin 0.8s linear infinite;
+  }
+
+  .ai-activity-entry.success {
+    color: ${(props) => props.theme.text};
+  }
+
+  .ai-activity-entry.success::before {
+    top: 5px;
+    width: 6px;
+    height: 6px;
+    background: ${(props) => props.theme.colors.success};
+  }
+
+  .ai-activity-entry.error {
+    color: ${(props) => props.theme.colors.text.danger};
+  }
+
+  .ai-activity-entry.error::before {
+    top: 5px;
+    width: 6px;
+    height: 6px;
+    background: ${(props) => props.theme.colors.text.danger};
+  }
+
+  @keyframes ai-activity-spin {
+    from {
+      transform: rotate(0deg);
+    }
+
+    to {
+      transform: rotate(360deg);
+    }
+  }
+
   .ai-actions {
     display: flex;
     align-items: center;

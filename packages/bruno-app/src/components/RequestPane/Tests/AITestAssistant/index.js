@@ -13,6 +13,7 @@ require('codemirror/mode/javascript/javascript');
 const SENSITIVE_KEY_PATTERN = /(authorization|cookie|token|password|secret|api[-_]?key|access[-_]?key|refresh[-_]?token|client[-_]?secret)/i;
 const MAX_FIELD_CHARS = 8000;
 const MAX_TEST_CHARS = 12000;
+const AI_PROGRESS_CHANNEL = 'main:ai:generate-tests:progress';
 
 const truncate = (value, limit = MAX_FIELD_CHARS) => {
   const text = value === undefined || value === null ? '' : String(value);
@@ -202,6 +203,24 @@ const extractCode = (content = '') => {
   return (fenceMatch ? fenceMatch[1] : text).trim();
 };
 
+const createActivityEntry = (message, state = 'running') => ({
+  id: `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+  message,
+  state
+});
+
+const formatAnalysisMessage = (analysis = []) => {
+  const entries = Array.isArray(analysis) ? analysis.filter(Boolean) : [];
+
+  if (!entries.length) {
+    return 'Generated updated Bruno tests.';
+  }
+
+  return entries
+    .map((entry) => entry.startsWith('- ') ? entry : `- ${entry}`)
+    .join('\n');
+};
+
 const CodePreview = ({ code }) => {
   const codeRef = useRef(null);
 
@@ -235,6 +254,7 @@ const AITestAssistant = ({ item, tests, onInsert, onReplace }) => {
   const [isSending, setIsSending] = useState(false);
   const [copied, setCopied] = useState(false);
   const [error, setError] = useState('');
+  const [activityLog, setActivityLog] = useState([]);
   const [availability, setAvailability] = useState({
     checking: false,
     enabled: false,
@@ -242,6 +262,7 @@ const AITestAssistant = ({ item, tests, onInsert, onReplace }) => {
     provider: 'openai'
   });
   const messagesRef = useRef(null);
+  const activeRequestIdRef = useRef('');
   const hasIpc = Boolean(window.ipcRenderer?.invoke);
 
   useEffect(() => {
@@ -249,7 +270,31 @@ const AITestAssistant = ({ item, tests, onInsert, onReplace }) => {
     setGeneratedCode('');
     setInput('');
     setError('');
+    setActivityLog([]);
+    activeRequestIdRef.current = '';
   }, [item.uid]);
+
+  useEffect(() => {
+    if (!hasIpc) {
+      return undefined;
+    }
+
+    return window.ipcRenderer.on(AI_PROGRESS_CHANNEL, (event = {}) => {
+      if (!event?.requestId || event.requestId !== activeRequestIdRef.current) {
+        return;
+      }
+
+      setActivityLog((currentLog) => {
+        const lastEntry = currentLog[0];
+
+        if (lastEntry?.message === event.message && lastEntry?.state === event.state) {
+          return currentLog;
+        }
+
+        return [createActivityEntry(event.message, event.state)];
+      });
+    });
+  }, [hasIpc]);
 
   useEffect(() => {
     if (!modalOpen) {
@@ -362,23 +407,33 @@ const AITestAssistant = ({ item, tests, onInsert, onReplace }) => {
 
     const userMessage = { role: 'user', content };
     const nextMessages = [...messages, userMessage];
+    const context = {
+      ...buildAITestContext({ item, tests }),
+      generatedTestsDraft: generatedCode ? truncate(generatedCode, MAX_TEST_CHARS) : ''
+    };
+    const requestId = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+    const requestLabel = `${context.request.method || 'REQUEST'} ${context.request.url || context.request.name}`;
 
     setMessages(nextMessages);
     setInput('');
     setError('');
     setIsSending(true);
+    setActivityLog([createActivityEntry(`Preparing context for ${requestLabel}`)]);
+    activeRequestIdRef.current = requestId;
 
     try {
       const result = await window.ipcRenderer.invoke('renderer:ai:generate-tests', {
-        context: buildAITestContext({ item, tests }),
+        requestId,
+        context,
         messages: nextMessages
       });
-      const assistantContent = result?.message || '';
-      const nextCode = extractCode(assistantContent);
+      const assistantContent = formatAnalysisMessage(result?.analysis);
+      const nextCode = extractCode(result?.tests || result?.message || '');
 
       setGeneratedCode(nextCode);
       setMessages([...nextMessages, { role: 'assistant', content: assistantContent }]);
     } catch (sendError) {
+      setActivityLog([createActivityEntry(sendError?.message || 'Failed to generate tests.', 'error')]);
       setError(sendError?.message || 'Failed to generate tests.');
     } finally {
       setIsSending(false);
@@ -417,6 +472,8 @@ const AITestAssistant = ({ item, tests, onInsert, onReplace }) => {
     toast.success('Tests replaced');
   };
 
+  const currentActivity = activityLog[0];
+
   return (
     <>
       <Button
@@ -447,6 +504,14 @@ const AITestAssistant = ({ item, tests, onInsert, onReplace }) => {
               <div className="ai-layout">
                 <section className="ai-chat">
                   <div className="ai-panel-header">Chat</div>
+                  {currentActivity ? (
+                    <div className="ai-activity">
+                      <div className="ai-activity-title">Activity</div>
+                      <div className={`ai-activity-entry ${currentActivity.state}`}>
+                        {currentActivity.message}
+                      </div>
+                    </div>
+                  ) : null}
                   <div className="ai-messages" ref={messagesRef}>
                     {messages.length ? messages.map((message, index) => (
                       <div className={`ai-message ${message.role}`} key={`${message.role}-${index}`}>

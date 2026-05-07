@@ -1,33 +1,36 @@
-require("dotenv").config();
+require('dotenv').config();
 
-const fs = require("node:fs");
-const os = require("node:os");
-const path = require("node:path");
-const { execFile } = require("node:child_process");
-const { ipcMain } = require("electron");
-const OpenAI = require("openai");
-const { AiStore } = require("../store/ai");
+const fs = require('node:fs');
+const os = require('node:os');
+const path = require('node:path');
+const { execFile } = require('node:child_process');
+const { ipcMain } = require('electron');
+const OpenAI = require('openai');
+const { AiStore } = require('../store/ai');
 
 const MAX_CONTEXT_CHARS = 20000;
 const MAX_MESSAGE_CHARS = 8000;
 const MAX_MESSAGES = 12;
 const CODEX_TIMEOUT_MS = 120000;
 const CODEX_MAX_BUFFER = 1024 * 1024 * 10;
+const AI_PROGRESS_CHANNEL = 'main:ai:generate-tests:progress';
 
 const OpenAIClient = OpenAI.OpenAI || OpenAI.default || OpenAI;
 const aiStore = new AiStore();
 
 const TEST_GENERATION_INSTRUCTIONS = [
-  "You are an AI assistant integrated inside the Bruno API client.",
-  "Generate Bruno request Tests JavaScript only.",
-  'Use Bruno-compatible syntax: test("...", function () { ... });, expect(...), res, req, and bru.',
-  "Prefer res.status and res.getBody() for response assertions.",
-  "Do not include markdown fences, explanations, imports, comments outside the test script, or surrounding text.",
-  "If the user asks for a follow-up change, return the complete updated test script.",
-].join("\n");
+  'You are an AI assistant integrated inside the Bruno API client.',
+  'Generate Bruno request Tests JavaScript and a short analysis summary.',
+  'Use Bruno-compatible syntax in the tests field: test("...", function () { ... });, expect(...), res, req, and bru.',
+  'Prefer res.status and res.getBody() for response assertions.',
+  'Analysis must be short, practical, and high-level. Do not reveal private reasoning or hidden chain-of-thought.',
+  'Return valid JSON only with this shape: {"analysis":["short sentence","short sentence"],"tests":"full Bruno test script"}',
+  'Do not include markdown fences, prose outside the JSON object, or imports.',
+  'If the user asks for a follow-up change, return the complete updated test script in the tests field.'
+].join('\n');
 
 const truncate = (value, limit) => {
-  const text = value === undefined || value === null ? "" : String(value);
+  const text = value === undefined || value === null ? '' : String(value);
 
   if (text.length <= limit) {
     return text;
@@ -40,7 +43,7 @@ const stringifyContext = (context) => {
   try {
     return truncate(JSON.stringify(context || {}, null, 2), MAX_CONTEXT_CHARS);
   } catch (error) {
-    return "{}";
+    return '{}';
   }
 };
 
@@ -49,8 +52,8 @@ const normalizeMessages = (messages = []) => {
     .filter((message) => message?.content)
     .slice(-MAX_MESSAGES)
     .map((message) => ({
-      role: message.role === "assistant" ? "assistant" : "user",
-      content: truncate(message.content, MAX_MESSAGE_CHARS),
+      role: message.role === 'assistant' ? 'assistant' : 'user',
+      content: truncate(message.content, MAX_MESSAGE_CHARS)
     }));
 };
 
@@ -61,29 +64,99 @@ const extractOutputText = (response) => {
 
   return (response?.output || [])
     .flatMap((item) => item?.content || [])
-    .map((content) => content?.text || "")
-    .join("");
+    .map((content) => content?.text || '')
+    .join('');
 };
 
 const buildInput = ({ context, messages }) => {
   const contextMessage = {
-    role: "user",
-    content: `Current Bruno request context:\n${stringifyContext(context)}`,
+    role: 'user',
+    content: `Current Bruno request context:\n${stringifyContext(context)}`
   };
 
   return [contextMessage, ...normalizeMessages(messages)];
 };
 
-const stripCodeFences = (content = "") => {
-  const text = String(content || "").trim();
-  const fenceMatch =
-    text.match(/```(?:javascript|js)?\s*([\s\S]*?)```/i) ||
-    text.match(/```\s*([\s\S]*?)```/);
+const emitAiProgress = (mainWindow, requestId, message, state = 'running') => {
+  if (!mainWindow?.webContents || !requestId) {
+    return;
+  }
+
+  mainWindow.webContents.send(AI_PROGRESS_CHANNEL, {
+    requestId,
+    message,
+    state,
+    timestamp: Date.now()
+  });
+};
+
+const stripCodeFences = (content = '') => {
+  const text = String(content || '').trim();
+  const fenceMatch
+    = text.match(/```(?:javascript|js)?\s*([\s\S]*?)```/i)
+      || text.match(/```\s*([\s\S]*?)```/);
   return (fenceMatch ? fenceMatch[1] : text).trim();
 };
 
-const expandHomePath = (filePath = "") => {
-  if (!filePath.startsWith("~")) {
+const normalizeAnalysis = (analysis) => {
+  if (Array.isArray(analysis)) {
+    return analysis
+      .map((entry) => String(entry || '').trim())
+      .filter(Boolean);
+  }
+
+  if (typeof analysis === 'string') {
+    return analysis
+      .split('\n')
+      .map((entry) => entry.replace(/^[-*]\s*/, '').trim())
+      .filter(Boolean);
+  }
+
+  return [];
+};
+
+const extractJsonObject = (content = '') => {
+  const stripped = stripCodeFences(content);
+
+  if (!stripped) {
+    return '';
+  }
+
+  if (stripped.startsWith('{') && stripped.endsWith('}')) {
+    return stripped;
+  }
+
+  const startIndex = stripped.indexOf('{');
+  const endIndex = stripped.lastIndexOf('}');
+
+  if (startIndex === -1 || endIndex === -1 || endIndex <= startIndex) {
+    return stripped;
+  }
+
+  return stripped.slice(startIndex, endIndex + 1);
+};
+
+const parseAiGenerationResult = (content = '') => {
+  const jsonCandidate = extractJsonObject(content);
+
+  try {
+    const parsed = JSON.parse(jsonCandidate);
+    const tests = typeof parsed?.tests === 'string' ? parsed.tests.trim() : '';
+
+    return {
+      analysis: normalizeAnalysis(parsed?.analysis),
+      tests: stripCodeFences(tests)
+    };
+  } catch (error) {
+    return {
+      analysis: [],
+      tests: stripCodeFences(content)
+    };
+  }
+};
+
+const expandHomePath = (filePath = '') => {
+  if (!filePath.startsWith('~')) {
     return filePath;
   }
 
@@ -98,7 +171,7 @@ const isExecutableFile = (filePath) => {
   try {
     fs.accessSync(
       filePath,
-      process.platform === "win32" ? fs.constants.F_OK : fs.constants.X_OK,
+      process.platform === 'win32' ? fs.constants.F_OK : fs.constants.X_OK
     );
     return fs.statSync(filePath).isFile();
   } catch (error) {
@@ -107,25 +180,25 @@ const isExecutableFile = (filePath) => {
 };
 
 const getPathCandidates = () => {
-  const pathDirs = (process.env.PATH || "")
+  const pathDirs = (process.env.PATH || '')
     .split(path.delimiter)
     .filter(Boolean);
-  const defaultDirs =
-    process.platform === "win32"
+  const defaultDirs
+    = process.platform === 'win32'
       ? []
-      : ["/opt/homebrew/bin", "/usr/local/bin", "/usr/bin", "/bin"];
+      : ['/opt/homebrew/bin', '/usr/local/bin', '/usr/bin', '/bin'];
 
   return Array.from(new Set([...pathDirs, ...defaultDirs]));
 };
 
 const findExecutableInPath = (binaryName) => {
-  const binaryNames =
-    process.platform === "win32"
+  const binaryNames
+    = process.platform === 'win32'
       ? [
           `${binaryName}.cmd`,
           `${binaryName}.exe`,
           `${binaryName}.bat`,
-          binaryName,
+          binaryName
         ]
       : [binaryName];
 
@@ -139,24 +212,24 @@ const findExecutableInPath = (binaryName) => {
     }
   }
 
-  return "";
+  return '';
 };
 
 const findCodexInVscodeExtensions = () => {
-  const extensionsDir = path.join(os.homedir(), ".vscode", "extensions");
+  const extensionsDir = path.join(os.homedir(), '.vscode', 'extensions');
 
   if (!fs.existsSync(extensionsDir)) {
-    return "";
+    return '';
   }
 
   const extensionDirs = fs
     .readdirSync(extensionsDir)
-    .filter((entry) => entry.startsWith("openai.chatgpt-"))
+    .filter((entry) => entry.startsWith('openai.chatgpt-'))
     .sort()
     .reverse();
 
   for (const extensionDir of extensionDirs) {
-    const binDir = path.join(extensionsDir, extensionDir, "bin");
+    const binDir = path.join(extensionsDir, extensionDir, 'bin');
 
     if (!fs.existsSync(binDir)) {
       continue;
@@ -172,9 +245,9 @@ const findCodexInVscodeExtensions = () => {
         const entryPath = path.join(current.dir, entry.name);
 
         if (
-          entry.isFile() &&
-          entry.name === "codex" &&
-          isExecutableFile(entryPath)
+          entry.isFile()
+          && entry.name === 'codex'
+          && isExecutableFile(entryPath)
         ) {
           return entryPath;
         }
@@ -186,11 +259,11 @@ const findCodexInVscodeExtensions = () => {
     }
   }
 
-  return "";
+  return '';
 };
 
-const resolveCodexCliPath = (configuredPath = "") => {
-  const requestedPath = expandHomePath(String(configuredPath || "").trim());
+const resolveCodexCliPath = (configuredPath = '') => {
+  const requestedPath = expandHomePath(String(configuredPath || '').trim());
 
   if (requestedPath) {
     if (!requestedPath.includes(path.sep)) {
@@ -200,7 +273,7 @@ const resolveCodexCliPath = (configuredPath = "") => {
         configuredPath,
         path: pathCandidate || requestedPath,
         found: Boolean(pathCandidate),
-        source: "configured",
+        source: 'configured'
       };
     }
 
@@ -208,18 +281,18 @@ const resolveCodexCliPath = (configuredPath = "") => {
       configuredPath,
       path: requestedPath,
       found: isExecutableFile(requestedPath),
-      source: "configured",
+      source: 'configured'
     };
   }
 
-  const pathCandidate = findExecutableInPath("codex");
+  const pathCandidate = findExecutableInPath('codex');
 
   if (pathCandidate) {
     return {
-      configuredPath: "",
+      configuredPath: '',
       path: pathCandidate,
       found: true,
-      source: "path",
+      source: 'path'
     };
   }
 
@@ -227,18 +300,18 @@ const resolveCodexCliPath = (configuredPath = "") => {
 
   if (vscodeCandidate) {
     return {
-      configuredPath: "",
+      configuredPath: '',
       path: vscodeCandidate,
       found: true,
-      source: "vscode-extension",
+      source: 'vscode-extension'
     };
   }
 
   return {
     configuredPath,
-    path: "",
+    path: '',
     found: false,
-    source: null,
+    source: null
   };
 };
 
@@ -265,7 +338,7 @@ const execFileWithInput = (file, args, options = {}) => {
         timeout: CODEX_TIMEOUT_MS,
         maxBuffer: CODEX_MAX_BUFFER,
         windowsHide: true,
-        ...execOptions,
+        ...execOptions
       },
       (error, stdout, stderr) => {
         if (error) {
@@ -276,7 +349,7 @@ const execFileWithInput = (file, args, options = {}) => {
         }
 
         resolve({ stdout, stderr });
-      },
+      }
     );
 
     if (input !== undefined) {
@@ -285,55 +358,55 @@ const execFileWithInput = (file, args, options = {}) => {
   });
 };
 
-const getCodexCliStatus = async (configuredPath = "") => {
+const getCodexCliStatus = async (configuredPath = '') => {
   const resolved = resolveCodexCliPath(configuredPath);
   const status = {
     ...resolved,
-    version: "",
+    version: '',
     loggedIn: false,
-    loginStatus: "",
-    error: "",
+    loginStatus: '',
+    error: ''
   };
 
   if (!resolved.found) {
     status.error = configuredPath
       ? `Codex CLI not found at ${configuredPath}`
-      : "Codex CLI not found. Install Codex or set a custom CLI path.";
+      : 'Codex CLI not found. Install Codex or set a custom CLI path.';
     return status;
   }
 
   try {
     const versionResult = await execFileWithInput(
       resolved.path,
-      ["--version"],
+      ['--version'],
       {
-        env: buildCodexEnv(resolved.path),
-      },
+        env: buildCodexEnv(resolved.path)
+      }
     );
     status.version = `${versionResult.stdout || versionResult.stderr}`.trim();
   } catch (error) {
-    status.error = error?.message || "Failed to run Codex CLI.";
+    status.error = error?.message || 'Failed to run Codex CLI.';
     return status;
   }
 
   try {
     const loginResult = await execFileWithInput(
       resolved.path,
-      ["login", "status"],
+      ['login', 'status'],
       {
-        env: buildCodexEnv(resolved.path),
-      },
+        env: buildCodexEnv(resolved.path)
+      }
     );
     status.loginStatus = `${loginResult.stdout || loginResult.stderr}`.trim();
-    status.loggedIn =
-      /logged in/i.test(status.loginStatus) &&
-      !/not logged in|not signed in/i.test(status.loginStatus);
+    status.loggedIn
+      = /logged in/i.test(status.loginStatus)
+        && !/not logged in|not signed in/i.test(status.loginStatus);
   } catch (error) {
     status.loginStatus = `${
-      error?.stdout || error?.stderr || error?.message || ""
+      error?.stdout || error?.stderr || error?.message || ''
     }`.trim();
-    status.error =
-      "Codex CLI is not logged in. Run `codex login` in your terminal.";
+    status.error
+      = 'Codex CLI is not logged in. Run `codex login` in your terminal.';
   }
 
   return status;
@@ -342,51 +415,52 @@ const getCodexCliStatus = async (configuredPath = "") => {
 const getAiStatus = async () => {
   const status = aiStore.getStatus();
   const codexCliStatus = await getCodexCliStatus(
-    status.codexCli.configuredPath,
+    status.codexCli.configuredPath
   );
   const provider = status.provider;
-  const providerEnabled =
-    provider === "openai"
+  const providerEnabled
+    = provider === 'openai'
       ? status.openai.enabled
       : codexCliStatus.found && codexCliStatus.loggedIn;
 
   return {
     ...status,
     enabled: providerEnabled,
-    model: provider === "openai" ? status.openai.model : status.codexCli.model,
+    model: provider === 'openai' ? status.openai.model : status.codexCli.model,
     errorMessage:
-      provider === "openai"
+      provider === 'openai'
         ? status.openai.enabled
-          ? ""
-          : "Missing OpenAI API key. Add one in Preferences > AI."
+          ? ''
+          : 'Missing OpenAI API key. Add one in Preferences > AI.'
         : providerEnabled
-        ? ""
-        : codexCliStatus.error,
+          ? ''
+          : codexCliStatus.error,
     codexCli: {
       ...status.codexCli,
-      ...codexCliStatus,
-    },
+      ...codexCliStatus
+    }
   };
 };
 
 const buildCodexCliPrompt = ({ context, messages }) => {
   const conversation = normalizeMessages(messages)
     .map((message) => `${message.role.toUpperCase()}:\n${message.content}`)
-    .join("\n\n");
+    .join('\n\n');
 
   return [
     TEST_GENERATION_INSTRUCTIONS,
-    "",
-    "Return the final answer as Bruno Tests JavaScript only.",
-    "",
+    '',
+    'Return the final answer as valid JSON only.',
+    '',
     `Current Bruno request context:\n${stringifyContext(context)}`,
-    conversation ? `Conversation:\n${conversation}` : "",
+    conversation ? `Conversation:\n${conversation}` : ''
   ]
     .filter(Boolean)
-    .join("\n\n");
+    .join('\n\n');
 };
 
-const runCodexCliGenerateTests = async (payload = {}) => {
+const runCodexCliGenerateTests = async (payload = {}, onProgress = () => {}) => {
+  onProgress('Checking Codex CLI availability');
   const status = await getCodexCliStatus(aiStore.getCodexCliPath());
 
   if (!status.found) {
@@ -395,56 +469,62 @@ const runCodexCliGenerateTests = async (payload = {}) => {
 
   if (!status.loggedIn) {
     throw new Error(
-      status.error ||
-        "Codex CLI is not logged in. Run `codex login` in your terminal.",
+      status.error
+      || 'Codex CLI is not logged in. Run `codex login` in your terminal.'
     );
   }
 
   const tempDir = await fs.promises.mkdtemp(
-    path.join(os.tmpdir(), "bruno-ai-"),
+    path.join(os.tmpdir(), 'bruno-ai-')
   );
-  const outputFile = path.join(tempDir, "last-message.txt");
+  const outputFile = path.join(tempDir, 'last-message.txt');
   const args = [
-    "--ask-for-approval",
-    "never",
-    "exec",
-    "--sandbox",
-    "read-only",
-    "--ephemeral",
-    "--skip-git-repo-check",
-    "--color",
-    "never",
-    "--output-last-message",
-    outputFile,
+    '--ask-for-approval',
+    'never',
+    'exec',
+    '--sandbox',
+    'read-only',
+    '--ephemeral',
+    '--skip-git-repo-check',
+    '--color',
+    'never',
+    '--output-last-message',
+    outputFile
   ];
   const codexModel = aiStore.getCodexModel();
 
   if (codexModel) {
-    args.push("--model", codexModel);
+    args.push('--model', codexModel);
   }
 
-  args.push("-");
+  args.push('-');
 
   try {
+    onProgress('Starting local Codex CLI session');
+    onProgress('Analyzing request, current tests, and latest response');
     const result = await execFileWithInput(status.path, args, {
       cwd: tempDir,
       env: buildCodexEnv(status.path),
-      input: buildCodexCliPrompt(payload),
+      input: buildCodexCliPrompt(payload)
     });
+    onProgress('Formatting final Bruno test script');
     const output = fs.existsSync(outputFile)
-      ? await fs.promises.readFile(outputFile, "utf8")
+      ? await fs.promises.readFile(outputFile, 'utf8')
       : result.stdout;
+    const parsed = parseAiGenerationResult(output);
 
     return {
-      model: codexModel || status.version || "codex-cli",
-      message: stripCodeFences(output),
+      model: codexModel || status.version || 'codex-cli',
+      analysis: parsed.analysis,
+      tests: parsed.tests,
+      message: output
     };
   } catch (error) {
     const detail = `${
-      error?.stderr ||
-      error?.stdout ||
-      error?.message ||
-      "Failed to run Codex CLI."
+      error?.stderr
+      || error?.stdout
+      || error?.message
+      || 'Failed to run Codex CLI.'
     }`.trim();
     throw new Error(detail);
   } finally {
@@ -452,12 +532,13 @@ const runCodexCliGenerateTests = async (payload = {}) => {
   }
 };
 
-const runOpenAiGenerateTests = async (payload = {}) => {
+const runOpenAiGenerateTests = async (payload = {}, onProgress = () => {}) => {
+  onProgress('Checking OpenAI API settings');
   const apiKey = aiStore.getApiKey();
 
   if (!apiKey) {
     throw new Error(
-      "Missing OpenAI API key. Add one in Preferences > AI or start Electron with OPENAI_API_KEY=...",
+      'Missing OpenAI API key. Add one in Preferences > AI or start Electron with OPENAI_API_KEY=...'
     );
   }
 
@@ -465,47 +546,67 @@ const runOpenAiGenerateTests = async (payload = {}) => {
   const model = aiStore.getModel();
 
   try {
+    onProgress(`Sending prompt to OpenAI API${model ? ` (${model})` : ''}`);
+    onProgress('Analyzing request, current tests, and latest response');
     const response = await client.responses.create({
       model,
       instructions: TEST_GENERATION_INSTRUCTIONS,
       input: buildInput(payload),
       max_output_tokens: 2000,
-      store: false,
+      store: false
     });
+    onProgress('Formatting final Bruno test script');
+    const output = extractOutputText(response);
+    const parsed = parseAiGenerationResult(output);
 
     return {
       model,
-      message: extractOutputText(response),
+      analysis: parsed.analysis,
+      tests: parsed.tests,
+      message: output
     };
   } catch (error) {
-    const detail = error?.message || "Failed to generate Bruno tests.";
+    const detail = error?.message || 'Failed to generate Bruno tests.';
     throw new Error(detail);
   }
 };
 
-const registerAiIpc = () => {
-  ipcMain.handle("renderer:ai:status", async () => getAiStatus());
+const registerAiIpc = (mainWindow) => {
+  ipcMain.handle('renderer:ai:status', async () => getAiStatus());
 
-  ipcMain.handle("renderer:ai:save-settings", async (_, settings = {}) => {
+  ipcMain.handle('renderer:ai:save-settings', async (_, settings = {}) => {
     aiStore.saveSettings(settings);
     return getAiStatus();
   });
 
-  ipcMain.handle("renderer:ai:clear-api-key", async () => {
+  ipcMain.handle('renderer:ai:clear-api-key', async () => {
     aiStore.clearApiKey();
     return getAiStatus();
   });
 
-  ipcMain.handle("renderer:ai:check-codex-cli", async (_, codexCliPath = "") =>
-    getCodexCliStatus(codexCliPath),
+  ipcMain.handle('renderer:ai:check-codex-cli', async (_, codexCliPath = '') =>
+    getCodexCliStatus(codexCliPath)
   );
 
-  ipcMain.handle("renderer:ai:generate-tests", async (_, payload = {}) => {
-    if (aiStore.getProvider() === "codex-cli") {
-      return runCodexCliGenerateTests(payload);
-    }
+  ipcMain.handle('renderer:ai:generate-tests', async (_, payload = {}) => {
+    const requestId = payload?.requestId || '';
+    const onProgress = (message, state) =>
+      emitAiProgress(mainWindow, requestId, message, state);
 
-    return runOpenAiGenerateTests(payload);
+    onProgress('Preparing AI request');
+
+    try {
+      const result
+        = aiStore.getProvider() === 'codex-cli'
+          ? await runCodexCliGenerateTests(payload, onProgress)
+          : await runOpenAiGenerateTests(payload, onProgress);
+
+      onProgress('Tests are ready to review', 'success');
+      return result;
+    } catch (error) {
+      onProgress(error?.message || 'Failed to generate tests.', 'error');
+      throw error;
+    }
   });
 };
 
