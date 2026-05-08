@@ -13,10 +13,17 @@ const MAX_MESSAGE_CHARS = 8000;
 const MAX_MESSAGES = 12;
 const CODEX_TIMEOUT_MS = 120000;
 const CODEX_MAX_BUFFER = 1024 * 1024 * 10;
+const CODEX_STATUS_CACHE_TTL_MS = 60_000;
+const CODEX_STATUS_ERROR_CACHE_TTL_MS = 5_000;
 const AI_PROGRESS_CHANNEL = 'main:ai:generate-tests:progress';
 
 const OpenAIClient = OpenAI.OpenAI || OpenAI.default || OpenAI;
 const aiStore = new AiStore();
+let codexCliStatusCache = {
+  key: '',
+  status: null,
+  expiresAt: 0
+};
 
 const TEST_GENERATION_INSTRUCTIONS = [
   'You are an AI assistant integrated inside the Bruno API client.',
@@ -418,6 +425,29 @@ const resolveCodexCliPath = (configuredPath = '') => {
   };
 };
 
+const normalizeCodexStatusCachePath = (filePath = '') => {
+  const expandedPath = expandHomePath(String(filePath || '').trim());
+
+  if (!expandedPath) {
+    return '';
+  }
+
+  try {
+    return fs.realpathSync(expandedPath);
+  } catch (error) {
+    return expandedPath;
+  }
+};
+
+const getCodexStatusCacheKey = (configuredPath = '', resolvedPath = '') =>
+  JSON.stringify([
+    normalizeCodexStatusCachePath(configuredPath),
+    normalizeCodexStatusCachePath(resolvedPath)
+  ]);
+
+const cloneCodexCliStatus = (status) =>
+  status ? { ...status } : null;
+
 const buildCodexEnv = (codexPath) => {
   const env = { ...process.env };
   delete env.OPENAI_API_KEY;
@@ -486,8 +516,20 @@ const getCodexCliCandidates = async (configuredPath = '') => {
   );
 };
 
-const getCodexCliStatus = async (configuredPath = '') => {
+const getCodexCliStatus = async (configuredPath = '', options = {}) => {
   const resolved = resolveCodexCliPath(configuredPath);
+  const cacheKey = getCodexStatusCacheKey(configuredPath, resolved.path);
+  const now = Date.now();
+
+  if (
+    !options.forceRefresh
+    && codexCliStatusCache.key === cacheKey
+    && codexCliStatusCache.status
+    && codexCliStatusCache.expiresAt > now
+  ) {
+    return cloneCodexCliStatus(codexCliStatusCache.status);
+  }
+
   const status = {
     ...resolved,
     sourceLabel: getCodexSourceLabel(resolved.source),
@@ -501,7 +543,12 @@ const getCodexCliStatus = async (configuredPath = '') => {
     status.error = configuredPath
       ? `Codex CLI not found at ${configuredPath}`
       : 'Codex CLI not found. Install Codex or set a custom CLI path.';
-    return status;
+    codexCliStatusCache = {
+      key: cacheKey,
+      status: cloneCodexCliStatus(status),
+      expiresAt: now + CODEX_STATUS_ERROR_CACHE_TTL_MS
+    };
+    return cloneCodexCliStatus(status);
   }
 
   try {
@@ -515,7 +562,12 @@ const getCodexCliStatus = async (configuredPath = '') => {
     status.version = `${versionResult.stdout || versionResult.stderr}`.trim();
   } catch (error) {
     status.error = error?.message || 'Failed to run Codex CLI.';
-    return status;
+    codexCliStatusCache = {
+      key: cacheKey,
+      status: cloneCodexCliStatus(status),
+      expiresAt: Date.now() + CODEX_STATUS_ERROR_CACHE_TTL_MS
+    };
+    return cloneCodexCliStatus(status);
   }
 
   try {
@@ -538,7 +590,13 @@ const getCodexCliStatus = async (configuredPath = '') => {
       = 'Codex CLI is not logged in. Run `codex login` in your terminal.';
   }
 
-  return status;
+  codexCliStatusCache = {
+    key: cacheKey,
+    status: cloneCodexCliStatus(status),
+    expiresAt: Date.now() + (status.error ? CODEX_STATUS_ERROR_CACHE_TTL_MS : CODEX_STATUS_CACHE_TTL_MS)
+  };
+
+  return cloneCodexCliStatus(status);
 };
 
 const getAiStatus = async () => {
@@ -714,7 +772,7 @@ const registerAiIpc = (mainWindow) => {
   });
 
   ipcMain.handle('renderer:ai:check-codex-cli', async (_, codexCliPath = '') =>
-    getCodexCliStatus(codexCliPath)
+    getCodexCliStatus(codexCliPath, { forceRefresh: true })
   );
 
   ipcMain.handle(
