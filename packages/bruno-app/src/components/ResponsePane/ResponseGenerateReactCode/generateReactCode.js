@@ -327,7 +327,9 @@ const buildHookFile = ({ method, names, pathParamKeys, queryParamKeys, hasBody, 
 
   if (isQuery) {
     hookParams.push(
-      `options?: ${isListResponse ? 'any' : `UseQueryOptions<${names.responseTypeName}, unknown, ${names.responseTypeName}, any>`}`
+      `options?: ${
+        isListResponse ? 'any' : `Partial<UseQueryOptions<${names.responseTypeName}, unknown, ${names.responseTypeName}, any>>`
+      }`
     );
     const keyMethodName = isListResponse ? 'list' : hasParams ? 'detail' : null;
     const queryKeyObject = buildQueryKeyObject({
