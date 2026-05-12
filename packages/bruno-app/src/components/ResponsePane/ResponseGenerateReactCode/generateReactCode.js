@@ -135,23 +135,13 @@ const buildResponseTypes = (data, responseTypeName) => {
   }
 };
 
-const prefixNestedTypeNames = (code, rootTypeName) => {
-  const declarationNames = Array.from(code.matchAll(/export\s+(?:interface|type)\s+([A-Za-z_$][A-Za-z0-9_$]*)/g))
-    .map((match) => match[1])
-    .filter((name) => name !== rootTypeName && !name.startsWith(rootTypeName));
-
-  return declarationNames.reduce((result, name) => {
-    return result.replace(new RegExp(`\\b${name}\\b`, 'g'), `${rootTypeName}${name}`);
-  }, code);
-};
-
 const buildBodyTypes = (bodyData, bodyTypeName) => {
   if (!bodyData || typeof bodyData !== 'object') {
     return '';
   }
 
   try {
-    return prefixNestedTypeNames(generateResponseModel(bodyData, 'typescript', bodyTypeName), bodyTypeName);
+    return generateResponseModel(bodyData, 'typescript', bodyTypeName);
   } catch (error) {
     return '';
   }

@@ -10,6 +10,25 @@ import TriggerWrapper from '../ResponseCopy/StyledWrapper';
 import StyledWrapper from './StyledWrapper';
 import { generateResponseModel, RESPONSE_MODEL_LANGUAGES } from './generateInterface';
 
+const toPascalCase = (value, fallback = 'GeneratedRequest') => {
+  const words = String(value || '')
+    .replace(/([a-z0-9])([A-Z])/g, '$1 $2')
+    .match(/[A-Za-z0-9]+/g) || [];
+
+  if (!words.length) {
+    return fallback;
+  }
+
+  const name = words.map((word) => word.charAt(0).toUpperCase() + word.slice(1)).join('');
+  return /^\d/.test(name) ? `${fallback}${name}` : name;
+};
+
+const getResponseTypeName = (item) => {
+  const requestName = item?.draft?.name || item?.name || item?.filename || 'Generated Request';
+
+  return `${toPascalCase(requestName)}Response`;
+};
+
 const ResponseGenerateInterface = forwardRef(({ data, item, children }, ref) => {
   const [modalOpen, setModalOpen] = useState(false);
   const [selectedLanguage, setSelectedLanguage] = useState(RESPONSE_MODEL_LANGUAGES[0].id);
@@ -35,6 +54,8 @@ const ResponseGenerateInterface = forwardRef(({ data, item, children }, ref) => 
     return RESPONSE_MODEL_LANGUAGES.find((language) => language.id === selectedLanguage) || RESPONSE_MODEL_LANGUAGES[0];
   }, [selectedLanguage]);
 
+  const responseTypeName = useMemo(() => getResponseTypeName(item), [item]);
+
   const generatedModel = useMemo(() => {
     if (!modalOpen) {
       return { code: '', error: null };
@@ -42,7 +63,7 @@ const ResponseGenerateInterface = forwardRef(({ data, item, children }, ref) => 
 
     try {
       return {
-        code: generateResponseModel(data, selectedLanguage),
+        code: generateResponseModel(data, selectedLanguage, responseTypeName),
         error: null
       };
     } catch (error) {
@@ -51,7 +72,7 @@ const ResponseGenerateInterface = forwardRef(({ data, item, children }, ref) => 
         error: error.message || 'Failed to generate interface'
       };
     }
-  }, [data, modalOpen, selectedLanguage]);
+  }, [data, modalOpen, responseTypeName, selectedLanguage]);
 
   const openModal = () => {
     if (!isDisabled) {

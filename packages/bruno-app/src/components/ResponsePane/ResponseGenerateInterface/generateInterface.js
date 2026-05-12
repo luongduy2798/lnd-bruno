@@ -195,6 +195,10 @@ const RESERVED_DART_WORDS = new Set([
 
 const IDENTIFIER_REGEX = /^[A-Za-z_$][A-Za-z0-9_$]*$/;
 const CLASS_IDENTIFIER_REGEX = /^[A-Za-z_][A-Za-z0-9_]*$/;
+const MODEL_NAME_PREFIX_REGEX = /^(get|fetch|load|list|read|create|add|update|edit|patch|put|post|delete|remove)(?=[A-Z])/i;
+const MODEL_NAME_SUFFIX_REGEX = /(Response|Request|Body|Model)$/;
+const COLLECTION_MODEL_KEYS = new Set(['results', 'items', 'records', 'list']);
+const ROOT_ENTITY_MODEL_KEYS = new Set(['result', 'item', 'record']);
 
 const isPlainObject = (value) => Boolean(value) && typeof value === 'object' && !Array.isArray(value);
 
@@ -388,22 +392,64 @@ const formatTypeScriptPropertyName = (key) => {
   return JSON.stringify(key);
 };
 
+const getTypeNameHint = (nameHint) => {
+  return typeof nameHint === 'string' ? nameHint : nameHint.nameHint;
+};
+
+const getRootEntityName = (rootName) => {
+  const rootTypeName = toPascalCase(rootName);
+  const entityName = rootTypeName
+    .replace(MODEL_NAME_PREFIX_REGEX, '')
+    .replace(MODEL_NAME_SUFFIX_REGEX, '');
+
+  return entityName || rootTypeName;
+};
+
+const createNestedTypeNameHint = ({ parentName, key, schema, rootTypeName, rootEntityName }) => {
+  const childName = toPascalCase(key);
+  const keyName = String(key).toLowerCase();
+  const parentEntityName = parentName === rootTypeName ? rootEntityName : parentName;
+
+  if (schema.kind === 'array' && COLLECTION_MODEL_KEYS.has(keyName)) {
+    return {
+      nameHint: rootEntityName,
+      preserveArrayItemName: true
+    };
+  }
+
+  if (ROOT_ENTITY_MODEL_KEYS.has(keyName)) {
+    return rootEntityName;
+  }
+
+  return `${parentEntityName}${childName}`;
+};
+
 const buildTypeScript = (schema, rootName = 'Response') => {
   const declarations = [];
   const getInterfaceName = createNameFactory();
+  const rootTypeName = toPascalCase(rootName);
+  const rootEntityName = getRootEntityName(rootName);
   const schemaToType = (currentSchema, nameHint) => {
     switch (currentSchema.kind) {
       case 'object': {
-        const interfaceName = getInterfaceName(nameHint);
+        const interfaceName = getInterfaceName(getTypeNameHint(nameHint));
         const lines = currentSchema.fields.map((field) => {
-          return `  ${formatTypeScriptPropertyName(field.key)}${field.optional ? '?' : ''}: ${schemaToType(field.schema, field.key)};`;
+          const nestedNameHint = createNestedTypeNameHint({
+            parentName: interfaceName,
+            key: field.key,
+            schema: field.schema,
+            rootTypeName,
+            rootEntityName
+          });
+          return `  ${formatTypeScriptPropertyName(field.key)}${field.optional ? '?' : ''}: ${schemaToType(field.schema, nestedNameHint)};`;
         });
 
         declarations.push(`export interface ${interfaceName} {\n${lines.length ? lines.join('\n') : '  [key: string]: unknown;'}\n}`);
         return interfaceName;
       }
       case 'array': {
-        const itemType = schemaToType(currentSchema.item, singularize(nameHint));
+        const itemNameHint = nameHint?.preserveArrayItemName ? getTypeNameHint(nameHint) : singularize(getTypeNameHint(nameHint));
+        const itemType = schemaToType(currentSchema.item, itemNameHint);
         return itemType.includes(' | ') ? `Array<${itemType}>` : `${itemType}[]`;
       }
       case 'union':
@@ -512,13 +558,17 @@ const buildJava = (schema, rootName = 'Response') => {
 const buildDart = (schema, rootName = 'Response') => {
   const classes = [];
   const getClassName = createNameFactory();
+  const rootTypeName = toPascalCase(rootName);
+  const rootEntityName = getRootEntityName(rootName);
 
   const schemaToType = (currentSchema, nameHint) => {
     switch (currentSchema.kind) {
       case 'object':
         return buildClass(currentSchema, nameHint);
-      case 'array':
-        return `List<${schemaToType(currentSchema.item, singularize(nameHint))}>`;
+      case 'array': {
+        const itemNameHint = nameHint?.preserveArrayItemName ? getTypeNameHint(nameHint) : singularize(getTypeNameHint(nameHint));
+        return `List<${schemaToType(currentSchema.item, itemNameHint)}>`;
+      }
       case 'union': {
         const nonNullTypes = currentSchema.types.filter((type) => type.kind !== 'null');
         const uniqueTypes = Array.from(new Set(nonNullTypes.map((type) => schemaToType(type, nameHint))));
@@ -599,9 +649,16 @@ const buildDart = (schema, rootName = 'Response') => {
   };
 
   const buildClass = (objectSchema, nameHint) => {
-    const className = getClassName(nameHint);
+    const className = getClassName(getTypeNameHint(nameHint));
     const fields = objectSchema.fields.map((field) => {
-      const baseType = schemaToType(field.schema, field.key);
+      const nestedNameHint = createNestedTypeNameHint({
+        parentName: className,
+        key: field.key,
+        schema: field.schema,
+        rootTypeName,
+        rootEntityName
+      });
+      const baseType = schemaToType(field.schema, nestedNameHint);
       const nullable = field.optional || hasNull(field.schema);
 
       return {
@@ -627,13 +684,13 @@ const buildDart = (schema, rootName = 'Response') => {
   };
 
   if (schema.kind === 'array') {
-    const itemType = schemaToType(schema.item, `${rootName}Item`);
+    const itemType = schemaToType(schema.item, `${rootTypeName}Item`);
     const rootArrayItemFromJson = schema.item.kind === 'object'
       ? `${itemType}.fromJson(item as Map<String, dynamic>)`
       : `item as ${itemType}`;
     const rootArrayItemToJson = schema.item.kind === 'object' ? 'item.toJson()' : 'item';
 
-    classes.push(`class ${toPascalCase(rootName)} {\n  final List<${itemType}> items;\n\n  const ${toPascalCase(rootName)}({\n    required this.items,\n  });\n\n  factory ${toPascalCase(rootName)}.fromJson(List<dynamic> json) {\n    return ${toPascalCase(rootName)}(\n      items: json.map((item) => ${rootArrayItemFromJson}).toList(),\n    );\n  }\n\n  List<dynamic> toJson() => items.map((item) => ${rootArrayItemToJson}).toList();\n}`);
+    classes.push(`class ${rootTypeName} {\n  final List<${itemType}> items;\n\n  const ${rootTypeName}({\n    required this.items,\n  });\n\n  factory ${rootTypeName}.fromJson(List<dynamic> json) {\n    return ${rootTypeName}(\n      items: json.map((item) => ${rootArrayItemFromJson}).toList(),\n    );\n  }\n\n  List<dynamic> toJson() => items.map((item) => ${rootArrayItemToJson}).toList();\n}`);
   } else {
     schemaToType(schema, rootName);
   }
